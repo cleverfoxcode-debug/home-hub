@@ -6,4 +6,6 @@ namespace config {
     constexpr std::uint32_t SerialBaudRate = 115200;
     constexpr const char*    WiFiSsid       = "YOUR_SSID";
     constexpr const char*    WiFiPassword   = "YOUR_PASSWORD";
+    constexpr const char*    OTAHostname    = "home-hub";
+    constexpr const char*    OTAPassword    = "homehub";
 }
