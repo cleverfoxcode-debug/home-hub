@@ -9,6 +9,7 @@ Application::Application(hub::core::ILogger& logger, hub::core::IService* const*
 }
 
 hub::core::Result Application::begin() {
+    m_logger.info("Application begin invoked");
     const auto result = m_serviceManager.beginAll();
     if (result != hub::core::Result::Ok) {
         m_logger.error("Application failed to start");
