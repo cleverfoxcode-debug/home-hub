@@ -1,11 +1,9 @@
 #include "WiFiService.h"
 #include <Arduino.h>
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
 #include <Preferences.h>
 #include <WiFi.h>
 #include <Config.h>
+#include "../../core/utils/WifiDebugCommands.h"
 
 namespace hub::services {
 
@@ -18,51 +16,8 @@ constexpr unsigned int kMaxFailedAttempts = 5;
 constexpr unsigned int kRouterRecoveryAttempts = 3;
 // GPIO, к которому подключена кнопка сброса настроек Wi-Fi.
 constexpr uint8_t kResetButtonPin = 0;
-// UUID сервиса BLE для первичной настройки.
-constexpr char kBleServiceUuid[] = "4fafc201-1fb5-459e-8fcc-c5c9c5c5d4b0";
-// UUID характеристики BLE, через которую будут приходить команды и ответы.
-constexpr char kBleCharacteristicUuid[] = "beb5483e-36e1-4688-bd8c-ccde5f4e4f0d";
-
-// Глобальные указатели на BLE-объекты и текущий сервис Wi-Fi.
-BLEServer* g_bleServer = nullptr;
-BLECharacteristic* g_bleCharacteristic = nullptr;
+// Глобальные указатели и текущий сервис Wi-Fi.
 hub::services::WiFiService* g_wifiService = nullptr;
-
-// Обработчик записи в BLE-характеристику.
-// Он понимает две команды: SCAN и строку вида "SSID|password".
-class ProvisioningCallbacks final : public BLECharacteristicCallbacks {
-public:
-    void onWrite(BLECharacteristic* characteristic) override {
-        if (g_wifiService == nullptr) {
-            return;
-        }
-
-        const std::string value = characteristic->getValue();
-        if (value.empty()) {
-            return;
-        }
-
-        const std::string input(value.begin(), value.end());
-        if (input == "SCAN") {
-            // Если пришла команда SCAN, запускаем поиск доступных Wi-Fi сетей.
-            g_wifiService->requestBleNetworkScan();
-            characteristic->setValue("SCAN_REQUESTED");
-            return;
-        }
-
-        // Ожидаем формат "SSID|password".
-        const size_t separator = input.find('|');
-        if (separator == std::string::npos) {
-            characteristic->setValue("ERR:format");
-            return;
-        }
-
-        const std::string ssid = input.substr(0, separator);
-        const std::string password = input.substr(separator + 1);
-        g_wifiService->applyProvisioningCredentials(ssid.c_str(), password.c_str());
-        characteristic->setValue("OK");
-    }
-};
 }
 
 void WiFiService::connectToNetwork() {
@@ -239,46 +194,22 @@ void WiFiService::requestBleNetworkScan() {
 }
 
 void WiFiService::startBleProvisioning() {
-    // Запускаем BLE-режим, чтобы приложение могло подключиться и пройти первичную настройку.
     if (m_bleProvisioningActive) {
         return;
     }
 
-    // Инициализируем BLE-устройство с понятным именем, чтобы приложение его увидело.
-    BLEDevice::init("HomeHub-Setup");
-    g_bleServer = BLEDevice::createServer();
-    BLEService* service = g_bleServer->createService(kBleServiceUuid);
-    g_bleCharacteristic = service->createCharacteristic(
-        kBleCharacteristicUuid,
-        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
-
-    g_bleCharacteristic->setCallbacks(new ProvisioningCallbacks());
-    g_bleCharacteristic->setValue("ready");
-    service->start();
-
-    // Включаем advertisement, чтобы телефон мог обнаружить устройство.
-    BLEAdvertising* advertising = BLEDevice::getAdvertising();
-    advertising->addServiceUUID(kBleServiceUuid);
-    advertising->setScanResponse(true);
-    advertising->setMinPreferred(0x06);
-    advertising->setMinPreferred(0x12);
-    BLEDevice::startAdvertising();
-
+    m_bleProvisioningService.begin();
+    m_bleProvisioningActive = m_bleProvisioningService.isActive();
     g_wifiService = this;
-    m_bleProvisioningActive = true;
     Serial.println("[WiFiService] BLE provisioning started");
 }
 
 void WiFiService::stopBleProvisioning() {
-    // Останавливаем BLE-режим после успешного подключения или перехода в другой режим.
     if (!m_bleProvisioningActive) {
         return;
     }
 
-    BLEDevice::stopAdvertising();
-    BLEDevice::deinit(true);
-    g_bleServer = nullptr;
-    g_bleCharacteristic = nullptr;
+    m_bleProvisioningService.shutdown();
     g_wifiService = nullptr;
     m_bleProvisioningActive = false;
     Serial.println("[WiFiService] BLE provisioning stopped");
@@ -344,6 +275,51 @@ hub::core::Result WiFiService::begin() {
 hub::core::Result WiFiService::update() {
     // Главный цикл работы сервиса.
     // Здесь решается, подключены ли мы к домашней сети, пытаемся ли переподключиться или находимся в режиме настройки.
+    if (Serial.available() > 0) {
+        std::string input;
+        while (Serial.available() > 0) {
+            char c = static_cast<char>(Serial.read());
+            if (c == '\n' || c == '\r') {
+                break;
+            }
+            input.push_back(c);
+        }
+
+        const auto command = hub::core::utils::parseWifiDebugCommand(input);
+        switch (command) {
+            case hub::core::utils::WifiDebugCommand::Help:
+                Serial.println("wifi help | wifi status | wifi ble | wifi ap | wifi connect | wifi reset | wifi scan");
+                break;
+            case hub::core::utils::WifiDebugCommand::Status:
+                Serial.printf("state=%d connected=%d ble=%d\n", static_cast<int>(m_state), m_isConnected ? 1 : 0, m_bleProvisioningActive ? 1 : 0);
+                break;
+            case hub::core::utils::WifiDebugCommand::StartBle:
+                startBleProvisioning();
+                Serial.println("BLE provisioning started");
+                break;
+            case hub::core::utils::WifiDebugCommand::StartAp:
+                startAccessPoint();
+                Serial.println("AP fallback requested");
+                break;
+            case hub::core::utils::WifiDebugCommand::Connect:
+                WiFi.mode(WIFI_STA);
+                WiFi.setAutoReconnect(true);
+                connectToNetwork();
+                Serial.println("Wi-Fi connection attempt started");
+                break;
+            case hub::core::utils::WifiDebugCommand::Reset:
+                resetStoredWiFiSettings();
+                Serial.println("Wi-Fi settings reset requested");
+                break;
+            case hub::core::utils::WifiDebugCommand::Scan:
+                requestBleNetworkScan();
+                Serial.println("BLE scan requested");
+                break;
+            default:
+                break;
+        }
+    }
+
     if (WiFi.status() == WL_CONNECTED) {
         if (m_state != ConnectionState::Connected) {
             transitionTo(ConnectionState::Connected);
@@ -431,10 +407,7 @@ hub::core::Result WiFiService::update() {
             m_bleResponse = "NO_NETWORKS";
         }
 
-        if (g_bleCharacteristic != nullptr) {
-            g_bleCharacteristic->setValue(m_bleResponse.c_str());
-            g_bleCharacteristic->notify();
-        }
+        m_bleProvisioningService.setResponse(m_bleResponse);
     }
     return hub::core::Result::Ok;
 }

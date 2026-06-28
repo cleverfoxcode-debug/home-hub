@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include "../../core/interfaces/IService.h"
+#include "../bluetooth/BleProvisioningService.h"
 
 namespace hub::services {
 
@@ -53,6 +54,7 @@ private:
     bool          m_bleScanRequested = false;
     bool          m_bleScanInProgress = false;
     ConnectionState m_state = ConnectionState::Booting;
+    BleProvisioningService m_bleProvisioningService;
     String        m_storedSsid;
     String        m_storedPassword;
     String        m_lastErrorMessage;
