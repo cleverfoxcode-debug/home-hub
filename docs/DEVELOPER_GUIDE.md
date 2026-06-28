@@ -711,7 +711,7 @@ ArduinoOTA.onError([](ota_error_t error) {
 
 **Файлы:** `src/services/heartbeat/HeartbeatService.h`, `src/services/heartbeat/HeartbeatService.cpp`
 
-**Назначение:** Периодический тик (каждую секунду). В текущей реализации только обновляет внутренний таймер. Может быть расширен для мигания LED, пинга watchdog, отправки keepalive.
+**Назначение:** Периодический тик (каждую секунду) + сброс аппаратного Watchdog (TWDT). Если `feed()` не вызывается в течение таймаута (10 секунд), ESP32 перезагружается.
 
 ```cpp
 namespace hub::services {
@@ -726,6 +726,7 @@ public:
 
 private:
     unsigned long m_lastTick = 0;
+    hub::core::utils::WatchdogManager m_watchdog;
 };
 
 }
@@ -733,14 +734,55 @@ private:
 
 **Логика:**
 ```cpp
+Result HeartbeatService::begin() {
+    m_lastTick = millis();
+    m_watchdog.begin();  // инициализация TWDT с таймаутом 10 сек
+    return Result::Ok;
+}
+
 Result HeartbeatService::update() {
+    m_watchdog.feed();   // сброс watchdog — если сервис зависнет, ESP32 перезагрузится
+
     if (millis() - m_lastTick >= 1000) {
         m_lastTick = millis();
         // TODO: мигание LED, отправка keepalive и т.д.
     }
     return Result::Ok;
 }
+
+Result HeartbeatService::shutdown() {
+    m_watchdog.end();    // остановка watchdog
+    return Result::Ok;
+}
 ```
+
+#### WatchdogManager
+
+**Файлы:** `src/core/utils/WatchdogManager.h`, `src/core/utils/WatchdogManager.cpp`
+
+Обёртка над ESP32 Task Watchdog Timer (TWDT).
+
+```cpp
+namespace hub::core::utils {
+
+class WatchdogManager {
+public:
+    explicit WatchdogManager(std::uint32_t timeoutSec = 10) noexcept;
+    void begin();  // инициализация TWDT
+    void feed();   // сброс таймера
+    void end();    // остановка
+};
+
+}
+```
+
+| Метод | Описание |
+|-------|----------|
+| `begin()` | Инициализирует TWDT с таймаутом timeoutSec секунд. Добавляет текущую задачу (loop) под надзор. |
+| `feed()` | Сбрасывает таймер. Должен вызываться чаще, чем timeoutSec. |
+| `end()` | Останавливает watchdog. Вызывается в shutdown(). |
+
+Если `feed()` не вызывается в течение таймаута, ESP32 аппаратно перезагружается. Это защищает от зависаний в loop().
 
 ---
 

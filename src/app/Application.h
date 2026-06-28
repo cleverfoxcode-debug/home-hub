@@ -13,6 +13,9 @@ namespace hub::app {
  * Application владеет сервисами и управляет их жизненным циклом.
  * Внутри используется менеджер сервисов, что упрощает добавление
  * новых модулей и гарантирует упорядоченное создание/закрытие.
+ *
+ * Поддерживает graceful shutdown: при вызове requestShutdown()
+ * в следующем цикле update() будет вызван shutdown() для всех сервисов.
  */
 class Application : public hub::core::NonCopyable {
 public:
@@ -22,9 +25,16 @@ public:
     hub::core::Result update();
     hub::core::Result shutdown();
 
+    /// Запросить graceful shutdown. shutdown() будет вызван в следующем update().
+    void requestShutdown();
+
+    /// true, если был запрошен shutdown.
+    bool isShutdownRequested() const;
+
 private:
-    hub::core::ILogger&   m_logger;
+    hub::core::ILogger&      m_logger;
     hub::core::ServiceManager m_serviceManager;
+    bool                      m_shutdownRequested = false;
 };
 
 } // namespace hub::app

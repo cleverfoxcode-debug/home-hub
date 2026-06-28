@@ -22,12 +22,28 @@ hub::core::Result Application::begin() {
 }
 
 hub::core::Result Application::update() {
+    // Если запрошен shutdown, выполняем его и больше не обновляем сервисы
+    if (m_shutdownRequested) {
+        m_shutdownRequested = false;
+        return shutdown();
+    }
+
     return m_serviceManager.updateAll();
 }
 
 hub::core::Result Application::shutdown() {
     m_logger.info("Application shutting down");
-    return m_serviceManager.shutdownAll();
+    const auto result = m_serviceManager.shutdownAll();
+    m_logger.info("Application shutdown complete");
+    return result;
+}
+
+void Application::requestShutdown() {
+    m_shutdownRequested = true;
+}
+
+bool Application::isShutdownRequested() const {
+    return m_shutdownRequested;
 }
 
 } // namespace hub::app

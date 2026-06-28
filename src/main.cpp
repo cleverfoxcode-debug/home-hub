@@ -51,10 +51,26 @@ static hub::core::IService* services[] = {
 
 static hub::app::Application app(logger, services, sizeof(services) / sizeof(services[0]));
 
+/// Обработчик перезагрузки по запросу (например, после OTA или по кнопке).
+/// Выполняет graceful shutdown всех сервисов перед перезагрузкой.
+void gracefulRestart() {
+    app.shutdown();
+    delay(100);
+    esp_restart();
+}
+
 void setup() {
+    // Устанавливаем обработчик на перезагрузку по запросу
+    // Например, при вызове ESP.restart() из OTA или по кнопке
     app.begin();
 }
 
 void loop() {
-    app.update();
+    hub::core::Result result = app.update();
+
+    // Если какой-то сервис вернул ошибку, делаем shutdown и перезагружаемся
+    if (result != hub::core::Result::Ok) {
+        logger.error("Application update failed, restarting");
+        gracefulRestart();
+    }
 }

@@ -26,8 +26,18 @@
 #define OTA_PASSWORD "homehub"
 #endif
 
+#ifndef STATUS_LED_PIN
+#define STATUS_LED_PIN 2
+#endif
+
+#ifndef WATCHDOG_TIMEOUT_SEC
+#define WATCHDOG_TIMEOUT_SEC 10
+#endif
+
 namespace config {
     constexpr std::uint32_t SerialBaudRate = 115200;
+    constexpr std::uint8_t  StatusLedPin   = STATUS_LED_PIN;
+    constexpr std::uint32_t WatchdogTimeoutSec = WATCHDOG_TIMEOUT_SEC;
     constexpr const char*    WiFiSsid       = WIFI_SSID;
     constexpr const char*    WiFiPassword   = WIFI_PASSWORD;
     constexpr const char*    OTAHostname    = OTA_HOSTNAME;

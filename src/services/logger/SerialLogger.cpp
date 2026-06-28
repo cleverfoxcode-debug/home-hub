@@ -15,9 +15,7 @@ hub::core::Result SerialLogger::shutdown() {
 }
 
 static void printLine(const char* prefix, std::string_view message) {
-    Serial.print(prefix);
-    Serial.write(message.data(), static_cast<size_t>(message.size()));
-    Serial.println();
+    Serial.printf("%s%.*s\n", prefix, static_cast<int>(message.size()), message.data());
 }
 
 void SerialLogger::info(std::string_view message) {
