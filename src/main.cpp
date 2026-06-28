@@ -12,9 +12,6 @@ static hub::services::HeartbeatService heartbeatService;
 static hub::core::IService*            services[] = {
     &logger,
     &wifiService,
-    &otaServer::IService*            services[] = {
-    &logger,
-    &wifiService,
     &otaServer,
     &heartbeatService,
 };
