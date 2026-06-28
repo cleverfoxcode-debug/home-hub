@@ -5,6 +5,7 @@
 
 #include "interfaces/IService.h"
 #include "interfaces/ILogger.h"
+#include "interfaces/IBleProvisioningHandler.h"
 #include "ServiceManager.h"
 #include "types/Result.h"
 #include "types/Types.h"

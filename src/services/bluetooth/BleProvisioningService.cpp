@@ -3,12 +3,15 @@
 namespace {
 constexpr char kBleServiceUuid[] = "4fafc201-1fb5-459e-8fcc-c5c9c5c5d4b0";
 constexpr char kBleCharacteristicUuid[] = "beb5483e-36e1-4688-bd8c-ccde5f4e4f0d";
+} // namespace
 
-BLEServer* g_bleServer = nullptr;
-BLECharacteristic* g_bleCharacteristic = nullptr;
+namespace hub::services {
 
 class ProvisioningCallbacks final : public BLECharacteristicCallbacks {
 public:
+    explicit ProvisioningCallbacks(hub::core::IBleProvisioningHandler& handler) noexcept
+        : m_handler(handler) {}
+
     void onWrite(BLECharacteristic* characteristic) override {
         const std::string value = characteristic->getValue();
         if (value.empty()) {
@@ -18,6 +21,7 @@ public:
         const std::string input(value.begin(), value.end());
         if (input == "SCAN") {
             characteristic->setValue("SCAN_REQUESTED");
+            m_handler.onProvisioningScanRequest();
             return;
         }
 
@@ -27,12 +31,16 @@ public:
             return;
         }
 
+        const std::string ssid = input.substr(0, separator);
+        const std::string password = input.substr(separator + 1);
+
+        m_handler.onProvisioningCredentials(ssid.c_str(), password.c_str());
         characteristic->setValue("OK");
     }
-};
-} // namespace
 
-namespace hub::services {
+private:
+    hub::core::IBleProvisioningHandler& m_handler;
+};
 
 hub::core::Result BleProvisioningService::begin() {
     if (m_active) {
@@ -40,14 +48,14 @@ hub::core::Result BleProvisioningService::begin() {
     }
 
     BLEDevice::init("HomeHub-Setup");
-    g_bleServer = BLEDevice::createServer();
-    BLEService* service = g_bleServer->createService(kBleServiceUuid);
-    g_bleCharacteristic = service->createCharacteristic(
+    m_server = BLEDevice::createServer();
+    BLEService* service = m_server->createService(kBleServiceUuid);
+    m_characteristic = service->createCharacteristic(
         kBleCharacteristicUuid,
         BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
 
-    g_bleCharacteristic->setCallbacks(new ProvisioningCallbacks());
-    g_bleCharacteristic->setValue("ready");
+    m_characteristic->setCallbacks(new ProvisioningCallbacks(m_handler));
+    m_characteristic->setValue("ready");
     service->start();
 
     BLEAdvertising* advertising = BLEDevice::getAdvertising();
@@ -67,9 +75,16 @@ hub::core::Result BleProvisioningService::update() {
         return hub::core::Result::Ok;
     }
 
-    if (!m_response.isEmpty() && g_bleCharacteristic != nullptr) {
-        g_bleCharacteristic->setValue(m_response.c_str());
-        g_bleCharacteristic->notify();
+    // Забираем результат сканирования из handler'а
+    const char* scanResponse = m_handler.consumeBleScanResponse();
+    if (scanResponse != nullptr && scanResponse[0] != '\0' && m_characteristic != nullptr) {
+        m_characteristic->setValue(scanResponse);
+        m_characteristic->notify();
+    }
+
+    if (!m_response.isEmpty() && m_characteristic != nullptr) {
+        m_characteristic->setValue(m_response.c_str());
+        m_characteristic->notify();
         m_response = "";
     }
 
@@ -83,24 +98,20 @@ hub::core::Result BleProvisioningService::shutdown() {
 
     BLEDevice::stopAdvertising();
     BLEDevice::deinit(true);
-    g_bleServer = nullptr;
-    g_bleCharacteristic = nullptr;
+    m_server = nullptr;
+    m_characteristic = nullptr;
     m_active = false;
     m_response = "";
     Serial.println("[BleProvisioningService] BLE stopped");
     return hub::core::Result::Ok;
 }
 
-bool BleProvisioningService::isActive() const {
-    return m_active;
-}
-
 void BleProvisioningService::setResponse(const String& response) {
     m_response = response;
 }
 
-String BleProvisioningService::response() const {
-    return m_response;
+bool BleProvisioningService::isActive() const {
+    return m_active;
 }
 
 } // namespace hub::services

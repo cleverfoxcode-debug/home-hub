@@ -5,24 +5,29 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include "../../core/interfaces/IService.h"
+#include "../../core/interfaces/IBleProvisioningHandler.h"
 
 namespace hub::services {
 
 class BleProvisioningService final : public hub::core::IService {
 public:
-    BleProvisioningService() = default;
+    explicit BleProvisioningService(hub::core::IBleProvisioningHandler& handler) noexcept
+        : m_handler(handler) {}
 
     hub::core::Result begin() override;
     hub::core::Result update() override;
     hub::core::Result shutdown() override;
 
-    bool isActive() const;
+    /// Установить ответ для BLE-клиента (список Wi-Fi сетей).
     void setResponse(const String& response);
-    String response() const;
+    bool isActive() const;
 
 private:
-    bool m_active = false;
-    String m_response;
+    hub::core::IBleProvisioningHandler& m_handler;
+    BLEServer*           m_server = nullptr;
+    BLECharacteristic*   m_characteristic = nullptr;
+    String               m_response;
+    bool                 m_active = false;
 };
 
 } // namespace hub::services

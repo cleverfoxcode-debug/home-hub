@@ -2,11 +2,13 @@
 
 #include <Arduino.h>
 #include "../../core/interfaces/IService.h"
-#include "../bluetooth/BleProvisioningService.h"
+#include "../../core/interfaces/ILogger.h"
+#include "../../core/interfaces/IBleProvisioningHandler.h"
 
 namespace hub::services {
 
-class WiFiService final : public hub::core::IService {
+class WiFiService final : public hub::core::IService
+                        , public hub::core::IBleProvisioningHandler {
 public:
     enum class ConnectionState {
         Booting,
@@ -16,16 +18,18 @@ public:
         SetupMode
     };
 
-    WiFiService() = default;
+    explicit WiFiService(hub::core::ILogger& logger) noexcept;
 
     hub::core::Result begin() override;
     hub::core::Result update() override;
     hub::core::Result shutdown() override;
 
-    void setProvisioningCredentials(const char* ssid, const char* password);
-    void applyProvisioningCredentials(const char* ssid, const char* password);
+    // IBleProvisioningHandler
+    void onProvisioningCredentials(const char* ssid, const char* password) override;
+    void onProvisioningScanRequest() override;
+    const char* consumeBleScanResponse() override;
+
     void resetStoredWiFiSettings();
-    void requestBleNetworkScan();
     ConnectionState state() const;
     bool requiresSetup() const;
     const String& lastErrorMessage() const;
@@ -43,6 +47,7 @@ private:
     void stopBleProvisioning();
 
 private:
+    hub::core::ILogger& m_logger;
     unsigned long m_lastConnectionAttemptMs = 0;
     unsigned int  m_failedConnectionAttempts = 0;
     unsigned int  m_routerRecoveryAttempts = 0;
@@ -54,7 +59,6 @@ private:
     bool          m_bleScanRequested = false;
     bool          m_bleScanInProgress = false;
     ConnectionState m_state = ConnectionState::Booting;
-    BleProvisioningService m_bleProvisioningService;
     String        m_storedSsid;
     String        m_storedPassword;
     String        m_lastErrorMessage;

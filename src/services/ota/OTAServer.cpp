@@ -5,8 +5,8 @@
 namespace hub::services {
 
 hub::core::Result OTAServer::begin() {
-    ArduinoOTA.setHostname("home-hub");
-    ArduinoOTA.setPassword("homehub");
+    ArduinoOTA.setHostname(config::OTAHostname);
+    ArduinoOTA.setPassword(config::OTAPassword);
 
     ArduinoOTA.onStart([]() {
         // Можно добавить логику начала OTA
