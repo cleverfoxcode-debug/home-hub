@@ -1,65 +1,138 @@
 #include "BleProvisioningService.h"
+#include <ArduinoJson.h>
 
 namespace {
-constexpr char kBleServiceUuid[] = "4fafc201-1fb5-459e-8fcc-c5c9c5c5d4b0";
-constexpr char kBleCharacteristicUuid[] = "beb5483e-36e1-4688-bd8c-ccde5f4e4f0d";
+
+// UUID должны совпадать с BleUuids в Flutter-приложении
+constexpr char kServiceUuid[]     = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+constexpr char kWriteCharUuid[]   = "beb5483e-36e1-4688-b7f5-ea07361b26a8"; // wifiConfig
+constexpr char kNotifyCharUuid[]  = "cba1d466-344c-4be3-ab31-10701b551fe1"; // hubResponse
+
+constexpr size_t kTokenBufSize = 64;
+constexpr size_t kPinBufSize   = 8;
+
 } // namespace
 
 namespace hub::services {
 
+// ─── Callbacks ───────────────────────────────────────────────────────────────
+
 class ProvisioningCallbacks final : public BLECharacteristicCallbacks {
 public:
-    explicit ProvisioningCallbacks(hub::core::IBleProvisioningHandler& handler) noexcept
-        : m_handler(handler) {}
+    explicit ProvisioningCallbacks(BleProvisioningService& service) noexcept
+        : m_service(service) {}
 
     void onWrite(BLECharacteristic* characteristic) override {
-        const std::string value = characteristic->getValue();
-        if (value.empty()) {
+        const std::string raw = characteristic->getValue();
+        if (raw.empty()) return;
+
+        StaticJsonDocument<256> doc;
+        const DeserializationError err = deserializeJson(doc, raw);
+
+        if (err) {
+            m_service.m_pendingResponse = BleProvisioningService::makeError("invalid_json");
             return;
         }
 
-        const std::string input(value.begin(), value.end());
-        if (input == "SCAN") {
-            characteristic->setValue("SCAN_REQUESTED");
-            m_handler.onProvisioningScanRequest();
-            return;
+        const char* command = doc["command"] | "";
+
+        if (strcmp(command, "get_status") == 0) {
+            _handleGetStatus();
+        } else if (strcmp(command, "setup") == 0) {
+            _handleSetup(doc);
+        } else if (strcmp(command, "auth") == 0) {
+            _handleAuth(doc);
+        } else {
+            m_service.m_pendingResponse = BleProvisioningService::makeError("unknown_command");
         }
-
-        const size_t separator = input.find('|');
-        if (separator == std::string::npos) {
-            characteristic->setValue("ERR:format");
-            return;
-        }
-
-        const std::string ssid = input.substr(0, separator);
-        const std::string password = input.substr(separator + 1);
-
-        m_handler.onProvisioningCredentials(ssid.c_str(), password.c_str());
-        characteristic->setValue("OK");
     }
 
 private:
-    hub::core::IBleProvisioningHandler& m_handler;
-};
+    BleProvisioningService& m_service;
 
-hub::core::Result BleProvisioningService::begin() {
-    if (m_active) {
-        return hub::core::Result::Ok;
+    void _handleGetStatus() {
+        const bool configured = m_service.m_handler.onGetStatus();
+        // {"status": "ok", "configured": true|false}
+        m_service.m_pendingResponse = BleProvisioningService::makeOk(
+            String(R"("configured":)") + (configured ? "true" : "false")
+        );
     }
 
-    BLEDevice::init("HomeHub-Setup");
-    m_server = BLEDevice::createServer();
-    BLEService* service = m_server->createService(kBleServiceUuid);
-    m_characteristic = service->createCharacteristic(
-        kBleCharacteristicUuid,
-        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
+    void _handleSetup(const JsonDocument& doc) {
+        const char* ssid = doc["ssid"] | "";
+        const char* pass = doc["pass"] | "";
 
-    m_characteristic->setCallbacks(new ProvisioningCallbacks(m_handler));
-    m_characteristic->setValue("ready");
+        if (ssid[0] == '\0' || pass[0] == '\0') {
+            m_service.m_pendingResponse = BleProvisioningService::makeError("missing_fields");
+            return;
+        }
+
+        char token[kTokenBufSize] = {};
+        char pin[kPinBufSize]     = {};
+
+        const bool ok = m_service.m_handler.onSetup(ssid, pass, token, pin);
+        if (!ok) {
+            m_service.m_pendingResponse = BleProvisioningService::makeError("wifi_failed");
+            return;
+        }
+
+        // {"status": "ok", "token": "...", "pin": "..."}
+        m_service.m_pendingResponse = BleProvisioningService::makeOk(
+            String(R"("token":")") + token + R"(","pin":")") + pin + "\""
+        );
+    }
+
+    void _handleAuth(const JsonDocument& doc) {
+        const char* pin = doc["pin"] | "";
+
+        if (pin[0] == '\0') {
+            m_service.m_pendingResponse = BleProvisioningService::makeError("missing_fields");
+            return;
+        }
+
+        char token[kTokenBufSize] = {};
+
+        const bool ok = m_service.m_handler.onAuth(pin, token);
+        if (!ok) {
+            m_service.m_pendingResponse = BleProvisioningService::makeError("wrong_pin");
+            return;
+        }
+
+        // {"status": "ok", "token": "..."}
+        m_service.m_pendingResponse = BleProvisioningService::makeOk(
+            String(R"("token":")") + token + "\""
+        );
+    }
+};
+
+// ─── Lifecycle ───────────────────────────────────────────────────────────────
+
+hub::core::Result BleProvisioningService::begin() {
+    if (m_active) return hub::core::Result::Ok;
+
+    BLEDevice::init("SmartNest-Hub");
+    m_server = BLEDevice::createServer();
+
+    BLEService* service = m_server->createService(kServiceUuid);
+
+    // Характеристика для приёма команд (WRITE)
+    m_writeChar = service->createCharacteristic(
+        kWriteCharUuid,
+        BLECharacteristic::PROPERTY_WRITE
+    );
+    m_writeChar->setCallbacks(new ProvisioningCallbacks(*this));
+
+    // Характеристика для отправки ответов (NOTIFY)
+    m_notifyChar = service->createCharacteristic(
+        kNotifyCharUuid,
+        BLECharacteristic::PROPERTY_NOTIFY
+    );
+    m_notifyChar->addDescriptor(new BLE2902()); // обязательно для notify
+
     service->start();
 
     BLEAdvertising* advertising = BLEDevice::getAdvertising();
-    advertising->addServiceUUID(kBleServiceUuid);
+    advertising->addServiceUUID(kServiceUuid);
     advertising->setScanResponse(true);
     advertising->setMinPreferred(0x06);
     advertising->setMinPreferred(0x12);
@@ -71,47 +144,49 @@ hub::core::Result BleProvisioningService::begin() {
 }
 
 hub::core::Result BleProvisioningService::update() {
-    if (!m_active) {
-        return hub::core::Result::Ok;
-    }
+    if (!m_active) return hub::core::Result::Ok;
 
-    // Забираем результат сканирования из handler'а
-    const char* scanResponse = m_handler.consumeBleScanResponse();
-    if (scanResponse != nullptr && scanResponse[0] != '\0' && m_characteristic != nullptr) {
-        m_characteristic->setValue(scanResponse);
-        m_characteristic->notify();
-    }
-
-    if (!m_response.isEmpty() && m_characteristic != nullptr) {
-        m_characteristic->setValue(m_response.c_str());
-        m_characteristic->notify();
-        m_response = "";
+    // Отправляем ответ если он появился после onWrite
+    if (!m_pendingResponse.isEmpty() && m_notifyChar != nullptr) {
+        m_notifyChar->setValue(m_pendingResponse.c_str());
+        m_notifyChar->notify();
+        m_pendingResponse = "";
     }
 
     return hub::core::Result::Ok;
 }
 
 hub::core::Result BleProvisioningService::shutdown() {
-    if (!m_active) {
-        return hub::core::Result::Ok;
-    }
+    if (!m_active) return hub::core::Result::Ok;
 
     BLEDevice::stopAdvertising();
     BLEDevice::deinit(true);
-    m_server = nullptr;
-    m_characteristic = nullptr;
-    m_active = false;
-    m_response = "";
+
+    m_server      = nullptr;
+    m_writeChar   = nullptr;
+    m_notifyChar  = nullptr;
+    m_active      = false;
+    m_pendingResponse = "";
+
     Serial.println("[BleProvisioningService] BLE stopped");
     return hub::core::Result::Ok;
 }
 
-void BleProvisioningService::setResponse(const String& response) {
-    m_response = response;
-}
-
 bool BleProvisioningService::isActive() const {
     return m_active;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+String BleProvisioningService::makeOk(const String& extra) {
+    if (extra.isEmpty()) {
+        return R"({"status":"ok"})";
+    }
+    return String(R"({"status":"ok",)") + extra + "}";
+}
+
+String BleProvisioningService::makeError(const char* message) {
+    return String(R"({"status":"error","message":")") + message + "\"}";
 }
 
 } // namespace hub::services
