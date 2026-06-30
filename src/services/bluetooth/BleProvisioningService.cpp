@@ -9,7 +9,6 @@ constexpr char kWriteCharUuid[]   = "beb5483e-36e1-4688-b7f5-ea07361b26a8"; // w
 constexpr char kNotifyCharUuid[]  = "cba1d466-344c-4be3-ab31-10701b551fe1"; // hubResponse
 
 constexpr size_t kTokenBufSize = 64;
-constexpr size_t kPinBufSize   = 8;
 
 } // namespace
 
@@ -40,8 +39,10 @@ public:
             _handleGetStatus();
         } else if (strcmp(command, "setup") == 0) {
             _handleSetup(doc);
-        } else if (strcmp(command, "auth") == 0) {
-            _handleAuth(doc);
+        } else if (strcmp(command, "confirm_token") == 0) {
+            _handleConfirmToken(doc);
+        } else if (strcmp(command, "enable_ap") == 0) {
+            _handleEnableAp();
         } else {
             m_service.m_pendingResponse = BleProvisioningService::makeError("unknown_command");
         }
@@ -68,39 +69,44 @@ private:
         }
 
         char token[kTokenBufSize] = {};
-        char pin[kPinBufSize]     = {};
 
-        const bool ok = m_service.m_handler.onSetup(ssid, pass, token, pin);
+        const bool ok = m_service.m_handler.onSetup(ssid, pass, token);
         if (!ok) {
             m_service.m_pendingResponse = BleProvisioningService::makeError("wifi_failed");
             return;
         }
 
-        // {"status": "ok", "token": "...", "pin": "..."}
+        // НЕ сохраняем токен сразу — ждём подтверждения от пользователя
+
+        // {"status": "ok", "token": "...", "wifi_connected": true|false}
+        const bool networkReady = m_service.m_handler.isNetworkReady();
         m_service.m_pendingResponse = BleProvisioningService::makeOk(
-            String(R"("token":")") + token + R"(","pin":")") + pin + "\""
+            String("\"token\":\"") + token + "\",\"wifi_connected\":" + (networkReady ? "true" : "false")
         );
     }
 
-    void _handleAuth(const JsonDocument& doc) {
-        const char* pin = doc["pin"] | "";
-
-        if (pin[0] == '\0') {
-            m_service.m_pendingResponse = BleProvisioningService::makeError("missing_fields");
+    void _handleConfirmToken(const JsonDocument& doc) {
+        const char* token = doc["token"] | "";
+        
+        if (token[0] == '\0') {
+            m_service.m_pendingResponse = BleProvisioningService::makeError("missing_token");
             return;
         }
 
-        char token[kTokenBufSize] = {};
-
-        const bool ok = m_service.m_handler.onAuth(pin, token);
-        if (!ok) {
-            m_service.m_pendingResponse = BleProvisioningService::makeError("wrong_pin");
-            return;
-        }
-
-        // {"status": "ok", "token": "..."}
+        // Сохраняем токен владельца в NVS
+        m_service.saveOwnerToken(token);
+        
+        // {"status": "ok", "message": "setup_complete"}
         m_service.m_pendingResponse = BleProvisioningService::makeOk(
-            String(R"("token":")") + token + "\""
+            String(R"("message":"setup_complete")")
+        );
+    }
+
+    void _handleEnableAp() {
+        m_service.m_handler.enableAccessPoint();
+        const bool networkReady = m_service.m_handler.isNetworkReady();
+        m_service.m_pendingResponse = BleProvisioningService::makeOk(
+            String("\"wifi_connected\":") + (networkReady ? "true" : "false")
         );
     }
 };
@@ -139,6 +145,7 @@ hub::core::Result BleProvisioningService::begin() {
     BLEDevice::startAdvertising();
 
     m_active = true;
+    m_provisioningActive = true;
     Serial.println("[BleProvisioningService] BLE started");
     return hub::core::Result::Ok;
 }
@@ -166,6 +173,7 @@ hub::core::Result BleProvisioningService::shutdown() {
     m_writeChar   = nullptr;
     m_notifyChar  = nullptr;
     m_active      = false;
+    m_provisioningActive = false;
     m_pendingResponse = "";
 
     Serial.println("[BleProvisioningService] BLE stopped");
@@ -174,6 +182,18 @@ hub::core::Result BleProvisioningService::shutdown() {
 
 bool BleProvisioningService::isActive() const {
     return m_active;
+}
+
+bool BleProvisioningService::isProvisioningActive() const {
+    return m_provisioningActive;
+}
+
+void BleProvisioningService::disableProvisioning() {
+    if (!m_provisioningActive) {
+        return;
+    }
+    m_provisioningActive = false;
+    Serial.println("[BleProvisioningService] Provisioning disabled, BLE stack remains active");
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -187,6 +207,20 @@ String BleProvisioningService::makeOk(const String& extra) {
 
 String BleProvisioningService::makeError(const char* message) {
     return String(R"({"status":"error","message":")") + message + "\"}";
+}
+
+// ─── Owner Token Management ──────────────────────────────────────────────────
+
+void BleProvisioningService::saveOwnerToken(const String& token) {
+    m_ownerStorage.save(token);
+}
+
+bool BleProvisioningService::hasOwner() const {
+    return m_ownerStorage.hasOwner();
+}
+
+bool BleProvisioningService::verifyOwnerToken(const char* token) const {
+    return m_ownerStorage.verify(token);
 }
 
 } // namespace hub::services

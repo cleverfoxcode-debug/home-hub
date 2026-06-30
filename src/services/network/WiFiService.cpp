@@ -2,7 +2,9 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include <Config.h>
+#include <cstdlib>
 
 namespace hub::services {
 
@@ -15,10 +17,121 @@ constexpr unsigned int kMaxFailedAttempts = 5;
 constexpr unsigned int kRouterRecoveryAttempts = 3;
 // GPIO, к которому подключена кнопка сброса настроек Wi-Fi.
 constexpr uint8_t kResetButtonPin = 0;
+
+// Размеры для генерации токена и PIN
+constexpr size_t kTokenSize = 64;
+constexpr size_t kPinSize   = 8;
+
+// NVS namespace
+constexpr char kNvsNamespace[] = "wifi";
+constexpr char kNvsConfigured[] = "configured";
+constexpr char kNvsSsid[] = "ssid";
+constexpr char kNvsPassword[] = "password";
+constexpr char kNvsToken[] = "token";
+constexpr char kNvsPin[] = "pin";
+
+// Символы для генерации токена
+constexpr char kTokenChars[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+constexpr size_t kTokenCharsCount = sizeof(kTokenChars) - 1;
+
+// Символы для генерации PIN
+constexpr char kPinChars[] = "0123456789";
+constexpr size_t kPinCharsCount = sizeof(kPinChars) - 1;
 }
 
 WiFiService::WiFiService(hub::core::ILogger& logger) noexcept
-    : m_logger(logger) {}
+    : m_logger(logger) {
+    // Инициализируем генератор случайных чисел
+    randomSeed(analogRead(0));
+}
+
+// ─── IBleProvisioningHandler ──────────────────────────────────────────────────
+
+bool WiFiService::onGetStatus() {
+    loadStoredConfiguration();
+    return m_hasStoredConfig;
+}
+
+bool WiFiService::onSetup(const char* ssid, const char* pass,
+                          char* outToken) {
+    if (ssid == nullptr || pass == nullptr || outToken == nullptr) {
+        m_logger.error("WiFi onSetup: invalid arguments");
+        return false;
+    }
+
+    // Сохраняем SSID и пароль в NVS
+    saveStoredConfiguration(String(ssid), String(pass));
+
+    // Генерируем токен
+    generateToken(outToken, kTokenSize);
+
+    // Сохраняем токен
+    {
+        Preferences preferences;
+        if (preferences.begin(kNvsNamespace, false)) {
+            preferences.putString(kNvsToken, outToken);
+            preferences.end();
+        }
+    }
+    m_storedToken = outToken;
+
+    // Пытаемся подключиться к Wi-Fi
+    transitionTo(ConnectionState::Connecting);
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    connectToNetwork();
+
+    // Ждём подключения не дольше 10 секунд
+    unsigned long start = millis();
+    while (millis() - start < 10000) {
+        if (WiFi.status() == WL_CONNECTED) {
+            transitionTo(ConnectionState::Connected);
+            m_lastErrorMessage = "";
+            m_logger.info("WiFi setup: connected successfully");
+            // После успешной настройки отключаем provisioning
+            disableBleProvisioning();
+            return true;
+        }
+        delay(100);
+    }
+
+    // Если не подключились — возвращаем false, но данные сохранены
+    m_logger.warn("WiFi setup: connection timeout, credentials saved");
+    transitionTo(ConnectionState::SetupMode);
+    m_lastErrorMessage = "Wi-Fi credentials saved but connection timeout";
+    return false;
+}
+
+void WiFiService::enableAccessPoint() {
+    // Включаем standalone AP-режим по команде из приложения
+    startAccessPoint();
+    m_logger.info("WiFi AP enabled by user command");
+}
+
+void WiFiService::disableBleProvisioning() {
+    // После успешной настройки отключаем provisioning-режим
+    // BLE-стек остаётся активным, но provisioning UUID больше не рекламируется
+    m_isProvisioningMode = false;
+    m_logger.info("WiFi BLE provisioning disabled");
+}
+
+// ─── Приватные методы ─────────────────────────────────────────────────────────
+
+void WiFiService::generateToken(char* outToken, size_t size) {
+    if (size < 2) return;
+    for (size_t i = 0; i < size - 1; ++i) {
+        outToken[i] = kTokenChars[rand() % kTokenCharsCount];
+    }
+    outToken[size - 1] = '\0';
+}
+
+void WiFiService::generatePin(char* outPin, size_t size) {
+    if (size < 2) return;
+    for (size_t i = 0; i < size - 1; ++i) {
+        outPin[i] = kPinChars[rand() % kPinCharsCount];
+    }
+    outPin[size - 1] = '\0';
+}
 
 void WiFiService::connectToNetwork() {
     if (WiFi.status() == WL_CONNECTED) {
@@ -70,19 +183,23 @@ void WiFiService::startAccessPoint() {
 
 void WiFiService::loadStoredConfiguration() {
     Preferences preferences;
-    if (!preferences.begin("wifi", true)) {
+    if (!preferences.begin(kNvsNamespace, true)) {
         m_logger.error("WiFi failed to read preferences");
         return;
     }
 
-    m_hasStoredConfig = preferences.getBool("configured", false);
+    m_hasStoredConfig = preferences.getBool(kNvsConfigured, false);
     if (m_hasStoredConfig) {
-        m_storedSsid = preferences.getString("ssid", "").c_str();
-        m_storedPassword = preferences.getString("password", "").c_str();
+        m_storedSsid = preferences.getString(kNvsSsid, "").c_str();
+        m_storedPassword = preferences.getString(kNvsPassword, "").c_str();
+        m_storedToken = preferences.getString(kNvsToken, "").c_str();
+        m_storedPin = preferences.getString(kNvsPin, "").c_str();
         m_logger.info("WiFi loaded stored configuration");
     } else {
         m_storedSsid = "";
         m_storedPassword = "";
+        m_storedToken = "";
+        m_storedPin = "";
     }
 
     preferences.end();
@@ -90,14 +207,14 @@ void WiFiService::loadStoredConfiguration() {
 
 void WiFiService::saveStoredConfiguration(const String& ssid, const String& password) {
     Preferences preferences;
-    if (!preferences.begin("wifi", false)) {
+    if (!preferences.begin(kNvsNamespace, false)) {
         m_logger.error("WiFi failed to write preferences");
         return;
     }
 
-    preferences.putBool("configured", true);
-    preferences.putString("ssid", ssid);
-    preferences.putString("password", password);
+    preferences.putBool(kNvsConfigured, true);
+    preferences.putString(kNvsSsid, ssid);
+    preferences.putString(kNvsPassword, password);
     preferences.end();
 
     m_hasStoredConfig = true;
@@ -108,7 +225,7 @@ void WiFiService::saveStoredConfiguration(const String& ssid, const String& pass
 
 void WiFiService::clearStoredConfiguration() {
     Preferences preferences;
-    if (!preferences.begin("wifi", false)) {
+    if (!preferences.begin(kNvsNamespace, false)) {
         m_logger.error("WiFi failed to clear preferences");
         return;
     }
@@ -119,36 +236,9 @@ void WiFiService::clearStoredConfiguration() {
     m_hasStoredConfig = false;
     m_storedSsid = "";
     m_storedPassword = "";
+    m_storedToken = "";
+    m_storedPin = "";
     m_logger.info("WiFi cleared settings");
-}
-
-void WiFiService::onProvisioningCredentials(const char* ssid, const char* password) {
-    if (ssid == nullptr || password == nullptr) {
-        return;
-    }
-
-    saveStoredConfiguration(String(ssid), String(password));
-    transitionTo(ConnectionState::Connecting);
-    WiFi.mode(WIFI_STA);
-    WiFi.setAutoReconnect(true);
-    connectToNetwork();
-
-    if (WiFi.status() == WL_CONNECTED) {
-        transitionTo(ConnectionState::Connected);
-        m_lastErrorMessage = "";
-        m_logger.info("WiFi BLE credentials received and connected");
-    } else {
-        transitionTo(ConnectionState::SetupMode);
-        m_lastErrorMessage = "BLE credentials received. Waiting for connection.";
-        m_logger.warn("WiFi BLE credentials received, waiting for connection");
-    }
-}
-
-void WiFiService::onProvisioningScanRequest() {
-    m_bleScanRequested = true;
-    m_bleScanInProgress = true;
-    m_bleResponse = "";
-    m_logger.info("WiFi BLE scan requested");
 }
 
 void WiFiService::resetStoredWiFiSettings() {
@@ -173,19 +263,9 @@ const String& WiFiService::lastErrorMessage() const {
     return m_lastErrorMessage;
 }
 
-const String& WiFiService::lastBleResponse() const {
-    return m_bleResponse;
-}
-
-const char* WiFiService::consumeBleScanResponse() {
-    if (m_bleResponse.isEmpty()) {
-        return "";
-    }
-    // Копируем во временный буфер, чтобы можно было безопасно очистить m_bleResponse
-    static String result;
-    result = m_bleResponse;
-    m_bleResponse = "";
-    return result.c_str();
+bool WiFiService::isNetworkReady() const {
+    return m_state == ConnectionState::Connected ||
+           m_state == ConnectionState::SetupMode;
 }
 
 void WiFiService::transitionTo(ConnectionState newState) {
@@ -197,6 +277,8 @@ void WiFiService::transitionTo(ConnectionState newState) {
     m_isProvisioningMode = (newState == ConnectionState::SetupMode);
     m_isConnected = (newState == ConnectionState::Connected);
 }
+
+// ─── IService ─────────────────────────────────────────────────────────────────
 
 hub::core::Result WiFiService::begin() {
     pinMode(kResetButtonPin, INPUT_PULLUP);
@@ -231,7 +313,17 @@ hub::core::Result WiFiService::update() {
             m_failedConnectionAttempts = 0;
             m_routerRecoveryAttempts = 0;
             m_lastErrorMessage = "";
-            m_logger.info("WiFi connected");
+
+            // Выводим IP-адрес в лог
+            const IPAddress ip = WiFi.localIP();
+            m_logger.info(std::string("WiFi connected, IP: ") + ip.toString().c_str());
+
+            // Запускаем mDNS — устройство будет доступно как home-hub.local
+            if (MDNS.begin(config::OTAHostname)) {
+                m_logger.info(std::string("mDNS started: ") + config::OTAHostname + ".local");
+            } else {
+                m_logger.warn("mDNS failed to start");
+            }
         }
         return hub::core::Result::Ok;
     }
@@ -242,10 +334,6 @@ hub::core::Result WiFiService::update() {
         m_lastErrorMessage = "Home Wi-Fi connection lost. Trying to reconnect.";
         m_logger.warn("WiFi connection lost, trying to reconnect");
         return hub::core::Result::Ok;
-    }
-
-    if (m_state == ConnectionState::SetupMode && WiFi.softAPgetStationNum() > 0) {
-        // provisioning client connected
     }
 
     if (m_state != ConnectionState::SetupMode) {
@@ -284,29 +372,11 @@ hub::core::Result WiFiService::update() {
         }
     }
 
-    if (m_bleScanRequested) {
-        m_bleScanRequested = false;
-        m_bleScanInProgress = false;
-        int networkCount = WiFi.scanNetworks(true, true);
-        if (networkCount > 0) {
-            String networks;
-            for (int i = 0; i < networkCount && i < 10; ++i) {
-                if (i > 0) {
-                    networks += ";";
-                }
-                networks += WiFi.SSID(i);
-            }
-            m_bleResponse = networks;
-        } else {
-            m_bleResponse = "NO_NETWORKS";
-        }
-        m_logger.info("WiFi BLE scan completed");
-    }
-
     return hub::core::Result::Ok;
 }
 
 hub::core::Result WiFiService::shutdown() {
+    MDNS.end();
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
     m_isConnected = false;

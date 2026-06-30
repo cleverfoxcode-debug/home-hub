@@ -1,15 +1,17 @@
 #include <Arduino.h>
 #include "app/Application.h"
 #include "services/logger/SerialLogger.h"
+#include "core/utils/OwnerTokenStorage.h"
 
 static hub::services::SerialLogger logger;
+static hub::core::utils::OwnerTokenStorage ownerStorage;
 
 // ─── SERVICE_BLE ────────────────────────────────────────────
 #if defined(SERVICE_BLE)
 #include "services/network/WiFiService.h"
 #include "services/bluetooth/BleProvisioningService.h"
 static hub::services::WiFiService           wifiService(logger);
-static hub::services::BleProvisioningService bleService(wifiService);
+static hub::services::BleProvisioningService bleService(wifiService, ownerStorage);
 static hub::core::IService* services[] = { &logger, &bleService };
 
 // ─── SERVICE_WIFI ───────────────────────────────────────────
@@ -37,7 +39,7 @@ static hub::core::IService* services[] = { &logger, &heartbeatService };
 #include "services/ota/OTAServer.h"
 #include "services/heartbeat/HeartbeatService.h"
 static hub::services::WiFiService           wifiService(logger);
-static hub::services::BleProvisioningService bleService(wifiService);
+static hub::services::BleProvisioningService bleService(wifiService, ownerStorage);
 static hub::services::OTAServer              otaServer;
 static hub::services::HeartbeatService       heartbeatService;
 static hub::core::IService* services[] = {

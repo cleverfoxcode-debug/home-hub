@@ -24,22 +24,32 @@ public:
 
     /**
      * @brief Вызывается при команде setup — первичная настройка Wi-Fi.
-     * @param ssid     SSID сети от клиента.
-     * @param pass     Пароль сети от клиента.
+     * @param ssid     SSID сети от клиента (может быть nullptr для AP-режима).
+     * @param pass     Пароль сети от клиента (может быть nullptr для AP-режима).
      * @param outToken Буфер для токена (минимум 64 байта).
-     * @param outPin   Буфер для PIN-кода (минимум 8 байт).
-     * @return true при успехе, false при ошибке подключения к Wi-Fi.
+     * @return true при успехе, false при ошибке.
      */
     virtual bool onSetup(const char* ssid, const char* pass,
-                         char* outToken, char* outPin) = 0;
+                         char* outToken) = 0;
 
     /**
-     * @brief Вызывается при команде auth — повторная аутентификация по PIN.
-     * @param pin      PIN-код от клиента.
-     * @param outToken Буфер для нового токена (минимум 64 байта).
-     * @return true если PIN верный, false если неверный.
+     * @brief Вызывается при команде enable_ap — включение standalone AP-режима.
+     * Хаб создаёт собственную сеть без роутера.
      */
-    virtual bool onAuth(const char* pin, char* outToken) = 0;
+    virtual void enableAccessPoint() = 0;
+
+    /**
+     * @brief Вызывается после успешной настройки Wi-Fi.
+     * Provisioning Service должен отключить рекламу provisioning UUID,
+     * но оставить BLE-стек активным для дальнейшего использования.
+     */
+    virtual void disableBleProvisioning() = 0;
+
+    /**
+     * @brief Проверить, готов ли сетевой интерфейс.
+     * @return true если Wi-Fi подключён ИЛИ AP-режим активен.
+     */
+    virtual bool isNetworkReady() const = 0;
 };
 
 } // namespace hub::core

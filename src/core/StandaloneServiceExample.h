@@ -2,6 +2,7 @@
 
 #include "ServiceRunner.h"
 #include "../services/network/WiFiService.h"
+#include "utils/OwnerTokenStorage.h"
 
 namespace hub::core {
 
@@ -20,7 +21,8 @@ class StandaloneServiceExample {
 public:
     StandaloneServiceExample() noexcept
         : m_wifiService(m_nullLogger)
-        , m_runner(m_wifiService) {}
+        , m_runner(m_wifiService)
+        , m_ownerStorage() {}
 
     Result begin() {
         return m_runner.runOnce();
@@ -38,10 +40,23 @@ public:
         return m_wifiService;
     }
 
+    hub::core::utils::OwnerTokenStorage& ownerStorage() {
+        return m_ownerStorage;
+    }
+
+    /// Получить статус через BLE-интерфейс
+    bool onGetStatus() { return m_wifiService.onGetStatus(); }
+    bool onSetup(const char* ssid, const char* pass, char* token) {
+        return m_wifiService.onSetup(ssid, pass, token);
+    }
+    void enableAccessPoint() { m_wifiService.enableAccessPoint(); }
+    void disableBleProvisioning() { m_wifiService.disableBleProvisioning(); }
+
 private:
     NullLogger m_nullLogger;
     hub::services::WiFiService m_wifiService;
     ServiceRunner m_runner;
+    hub::core::utils::OwnerTokenStorage m_ownerStorage;
 };
 
 } // namespace hub::core
